@@ -67,11 +67,13 @@ every other one.
 
 ## Tools
 
-Agents get two tools:
+Agents get three tools:
 
 - **`list_agents`** — lists all connected agents by PID
 - **`send(to, message)`** — sends a message to another agent by PID, delivered
   instantly as a channel event
+- **`broadcast(message)`** — sends a message to all other connected agents at
+  once
 
 ## Example
 

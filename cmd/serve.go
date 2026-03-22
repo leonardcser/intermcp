@@ -8,6 +8,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/leoadberg/intermcp/daemon"
@@ -88,8 +90,10 @@ func Serve() {
 		fmt.Sscanf(override, "%d", &parentPID)
 	}
 
+	project := projectRoot()
+
 	// Register with the daemon and consume the ack.
-	if _, err := dc.request(daemon.Envelope{Type: daemon.TypeRegister, From: parentPID}); err != nil {
+	if _, err := dc.request(daemon.Envelope{Type: daemon.TypeRegister, From: parentPID, Project: project}); err != nil {
 		log.Fatalf("failed to register with daemon: %v", err)
 	}
 
@@ -136,6 +140,7 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 				"Messages from other Claude Code agents arrive as <channel source=\"intermcp\" from_pid=\"...\">.\n" +
 				"Use the `list_agents` tool to discover other running agents.\n" +
 				"Use the `send` tool to send a message to another agent by PID.\n" +
+				"Use the `broadcast` tool to send a message to all other connected agents at once.\n" +
 				"When you receive a channel message, respond helpfully — you are collaborating with the sender.",
 		}, nil
 	})
@@ -149,10 +154,15 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 			"tools": []map[string]any{
 				{
 					"name":        "list_agents",
-					"description": "List all running Claude Code agents that are connected to intermcp.",
+					"description": "List running Claude Code agents connected to intermcp. By default only shows agents in the same project (git repo).",
 					"inputSchema": map[string]any{
-						"type":       "object",
-						"properties": map[string]any{},
+						"type": "object",
+						"properties": map[string]any{
+							"all": map[string]any{
+								"type":        "boolean",
+								"description": "If true, list agents across all projects.",
+							},
+						},
 					},
 				},
 				{
@@ -173,6 +183,24 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 						"required": []string{"to", "message"},
 					},
 				},
+				{
+					"name":        "broadcast",
+					"description": "Send a message to all other connected Claude Code agents. By default only broadcasts to agents in the same project (git repo).",
+					"inputSchema": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"message": map[string]any{
+								"type":        "string",
+								"description": "The message to broadcast.",
+							},
+							"all": map[string]any{
+								"type":        "boolean",
+								"description": "If true, broadcast to agents across all projects.",
+							},
+						},
+						"required": []string{"message"},
+					},
+				},
 			},
 		}, nil
 	})
@@ -191,8 +219,12 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 
 		switch req.Name {
 		case "list_agents":
+			var args struct {
+				All bool `json:"all"`
+			}
+			json.Unmarshal(req.Arguments, &args)
 			reqMu.Lock()
-			resp, err := dc.request(daemon.Envelope{Type: daemon.TypeList})
+			resp, err := dc.request(daemon.Envelope{Type: daemon.TypeList, All: args.All})
 			reqMu.Unlock()
 			if err != nil {
 				return toolError("failed to list agents: " + err.Error()), nil
@@ -209,7 +241,11 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 				if a.PID == pid {
 					marker = " (you)"
 				}
-				lines += fmt.Sprintf("  PID %d — %s%s\n", a.PID, name, marker)
+				if args.All && a.Project != "" {
+					lines += fmt.Sprintf("  PID %d — %s [%s]%s\n", a.PID, name, a.Project, marker)
+				} else {
+					lines += fmt.Sprintf("  PID %d — %s%s\n", a.PID, name, marker)
+				}
 			}
 			return toolResult(lines), nil
 
@@ -234,14 +270,63 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 				return toolError("send failed: " + err.Error()), nil
 			}
 			if resp.Type == daemon.TypeError {
-				return toolError(string(resp.Body)), nil
+				return toolError(daemonError(resp.Body)), nil
 			}
 			return toolResult(fmt.Sprintf("Message sent to PID %d.", args.To)), nil
+
+		case "broadcast":
+			var args struct {
+				Message string `json:"message"`
+				All     bool   `json:"all"`
+			}
+			if err := json.Unmarshal(req.Arguments, &args); err != nil {
+				return toolError("bad arguments: " + err.Error()), nil
+			}
+			body, _ := json.Marshal(map[string]string{"message": args.Message})
+			reqMu.Lock()
+			resp, err := dc.request(daemon.Envelope{
+				Type: daemon.TypeBroadcast,
+				From: pid,
+				Body: body,
+				All:  args.All,
+			})
+			reqMu.Unlock()
+			if err != nil {
+				return toolError("broadcast failed: " + err.Error()), nil
+			}
+			if resp.Type == daemon.TypeError {
+				return toolError(daemonError(resp.Body)), nil
+			}
+			return toolResult("Message broadcast to all agents."), nil
 
 		default:
 			return nil, fmt.Errorf("unknown tool: %s", req.Name)
 		}
 	})
+}
+
+// projectRoot returns the root of the git repository for the current working
+// directory, falling back to the working directory itself.
+func projectRoot() string {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
+}
+
+func daemonError(body json.RawMessage) string {
+	var parsed struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) == nil && parsed.Error != "" {
+		return parsed.Error
+	}
+	return string(body)
 }
 
 func toolResult(text string) map[string]any {

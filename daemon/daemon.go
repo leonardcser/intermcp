@@ -24,24 +24,28 @@ const (
 	TypeAgents     = "agents"
 	TypeSend       = "send"
 	TypeSent       = "sent"
+	TypeBroadcast  = "broadcast"
 	TypeMessage    = "message"
 	TypeError      = "error"
 )
 
 // Envelope is the wire format between MCP serve instances and the daemon.
 type Envelope struct {
-	Type string          `json:"type"`
-	From int             `json:"from,omitempty"`
-	To   int             `json:"to,omitempty"`
-	Body json.RawMessage `json:"body,omitempty"`
-	Name string          `json:"name,omitempty"`
+	Type    string          `json:"type"`
+	From    int             `json:"from,omitempty"`
+	To      int             `json:"to,omitempty"`
+	Body    json.RawMessage `json:"body,omitempty"`
+	Name    string          `json:"name,omitempty"`
+	Project string          `json:"project,omitempty"`
+	All     bool            `json:"all,omitempty"`
 }
 
 // Agent tracks a connected MCP serve instance.
 type Agent struct {
-	PID  int    `json:"pid"`
-	Name string `json:"name,omitempty"`
-	conn net.Conn
+	PID     int    `json:"pid"`
+	Name    string `json:"name,omitempty"`
+	Project string `json:"project,omitempty"`
+	conn    net.Conn
 }
 
 // Daemon is the central relay.
@@ -94,16 +98,20 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		case TypeRegister:
 			agentPID = env.From
 			d.mu.Lock()
-			d.agents[agentPID] = &Agent{PID: agentPID, Name: env.Name, conn: conn}
+			d.agents[agentPID] = &Agent{PID: agentPID, Name: env.Name, Project: env.Project, conn: conn}
 			d.mu.Unlock()
-			log.Printf("agent %d registered (name=%q)", agentPID, env.Name)
+			log.Printf("agent %d registered (name=%q, project=%q)", agentPID, env.Name, env.Project)
 			d.sendTo(conn, Envelope{Type: TypeRegistered})
 
 		case TypeList:
 			d.mu.RLock()
+			sender := d.agents[agentPID]
 			agents := make([]Agent, 0, len(d.agents))
 			for _, a := range d.agents {
-				agents = append(agents, Agent{PID: a.PID, Name: a.Name})
+				if !d.sameProject(sender, a, env.All) {
+					continue
+				}
+				agents = append(agents, Agent{PID: a.PID, Name: a.Name, Project: a.Project})
 			}
 			d.mu.RUnlock()
 			body, _ := json.Marshal(agents)
@@ -126,8 +134,42 @@ func (d *Daemon) handleConn(conn net.Conn) {
 				continue
 			}
 			d.sendTo(conn, Envelope{Type: TypeSent})
+
+		case TypeBroadcast:
+			fwd := Envelope{Type: TypeMessage, From: env.From, Body: env.Body}
+			data, _ := json.Marshal(fwd)
+			data = append(data, '\n')
+
+			type target struct {
+				pid  int
+				conn net.Conn
+			}
+			d.mu.RLock()
+			sender := d.agents[agentPID]
+			targets := make([]target, 0, len(d.agents))
+			for pid, a := range d.agents {
+				if pid == env.From {
+					continue
+				}
+				if !d.sameProject(sender, a, env.All) {
+					continue
+				}
+				targets = append(targets, target{pid, a.conn})
+			}
+			d.mu.RUnlock()
+
+			for _, t := range targets {
+				if _, err := t.conn.Write(data); err != nil {
+					log.Printf("failed to broadcast to agent %d: %v", t.pid, err)
+				}
+			}
+			d.sendTo(conn, Envelope{Type: TypeSent})
 		}
 	}
+}
+
+func (d *Daemon) sameProject(sender, target *Agent, all bool) bool {
+	return all || sender == nil || sender.Project == "" || target.Project == sender.Project
 }
 
 func (d *Daemon) sendTo(conn net.Conn, env Envelope) error {
