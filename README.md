@@ -37,23 +37,16 @@ sessions.
 
 ## Setup
 
-Build the binary:
+Install the binary:
 
 ```sh
-go build -o intermcp .
+go install github.com/leoadberg/intermcp@latest
 ```
 
-Add it to your `.mcp.json` (already included in this repo):
+Add it as a global MCP server:
 
-```json
-{
-  "mcpServers": {
-    "intermcp": {
-      "command": "/path/to/intermcp",
-      "args": ["serve"]
-    }
-  }
-}
+```sh
+claude mcp add --scope user intermcp -- intermcp serve
 ```
 
 Start Claude Code with channels enabled:
