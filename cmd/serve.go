@@ -139,8 +139,7 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 			"instructions": "You are connected to intermcp, an inter-agent communication channel.\n" +
 				"Messages from other Claude Code agents arrive as <channel source=\"intermcp\" from_pid=\"...\">.\n" +
 				"Use the `list_agents` tool to discover other running agents.\n" +
-				"Use the `send` tool to send a message to another agent by PID.\n" +
-				"Use the `broadcast` tool to send a message to all other connected agents at once.\n" +
+				"Use the `send` tool to send a message to one or more agents by PID.\n" +
 				"When you receive a channel message, respond helpfully — you are collaborating with the sender.",
 		}, nil
 	})
@@ -167,13 +166,16 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 				},
 				{
 					"name":        "send",
-					"description": "Send a message to another Claude Code agent by PID. The message is delivered instantly via their channel.",
+					"description": "Send a message to one or more Claude Code agents by PID. The message is delivered instantly via their channel.",
 					"inputSchema": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"to": map[string]any{
-								"type":        "integer",
-								"description": "The PID of the target agent.",
+								"type": "array",
+								"items": map[string]any{
+									"type": "integer",
+								},
+								"description": "The PIDs of the target agents.",
 							},
 							"message": map[string]any{
 								"type":        "string",
@@ -181,24 +183,6 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 							},
 						},
 						"required": []string{"to", "message"},
-					},
-				},
-				{
-					"name":        "broadcast",
-					"description": "Send a message to all other connected Claude Code agents. By default only broadcasts to agents in the same project (git repo).",
-					"inputSchema": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"message": map[string]any{
-								"type":        "string",
-								"description": "The message to broadcast.",
-							},
-							"all": map[string]any{
-								"type":        "boolean",
-								"description": "If true, broadcast to agents across all projects.",
-							},
-						},
-						"required": []string{"message"},
 					},
 				},
 			},
@@ -251,53 +235,46 @@ func setupMCPHandlers(s *protocol.Server, dc *daemonClient, pid int) {
 
 		case "send":
 			var args struct {
-				To      int    `json:"to"`
+				To      []int  `json:"to"`
 				Message string `json:"message"`
 			}
 			if err := json.Unmarshal(req.Arguments, &args); err != nil {
 				return toolError("bad arguments: " + err.Error()), nil
 			}
-			body, _ := json.Marshal(map[string]string{"message": args.Message})
-			reqMu.Lock()
-			resp, err := dc.request(daemon.Envelope{
-				Type: daemon.TypeSend,
-				From: pid,
-				To:   args.To,
-				Body: body,
-			})
-			reqMu.Unlock()
-			if err != nil {
-				return toolError("send failed: " + err.Error()), nil
-			}
-			if resp.Type == daemon.TypeError {
-				return toolError(daemonError(resp.Body)), nil
-			}
-			return toolResult(fmt.Sprintf("Message sent to PID %d.", args.To)), nil
-
-		case "broadcast":
-			var args struct {
-				Message string `json:"message"`
-				All     bool   `json:"all"`
-			}
-			if err := json.Unmarshal(req.Arguments, &args); err != nil {
-				return toolError("bad arguments: " + err.Error()), nil
+			if len(args.To) == 0 {
+				return toolError("at least one recipient PID is required"), nil
 			}
 			body, _ := json.Marshal(map[string]string{"message": args.Message})
-			reqMu.Lock()
-			resp, err := dc.request(daemon.Envelope{
-				Type: daemon.TypeBroadcast,
-				From: pid,
-				Body: body,
-				All:  args.All,
-			})
-			reqMu.Unlock()
-			if err != nil {
-				return toolError("broadcast failed: " + err.Error()), nil
+			var errors []string
+			var sent []int
+			for _, to := range args.To {
+				reqMu.Lock()
+				resp, err := dc.request(daemon.Envelope{
+					Type: daemon.TypeSend,
+					From: pid,
+					To:   to,
+					Body: body,
+				})
+				reqMu.Unlock()
+				if err != nil {
+					errors = append(errors, fmt.Sprintf("PID %d: %s", to, err.Error()))
+				} else if resp.Type == daemon.TypeError {
+					errors = append(errors, fmt.Sprintf("PID %d: %s", to, daemonError(resp.Body)))
+				} else {
+					sent = append(sent, to)
+				}
 			}
-			if resp.Type == daemon.TypeError {
-				return toolError(daemonError(resp.Body)), nil
+			var result string
+			if len(sent) > 0 {
+				result = fmt.Sprintf("Message sent to %d agent(s).", len(sent))
 			}
-			return toolResult("Message broadcast to all agents."), nil
+			if len(errors) > 0 {
+				result += "\nErrors:\n" + strings.Join(errors, "\n")
+			}
+			if len(sent) == 0 {
+				return toolError(result), nil
+			}
+			return toolResult(result), nil
 
 		default:
 			return nil, fmt.Errorf("unknown tool: %s", req.Name)

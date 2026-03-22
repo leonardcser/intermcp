@@ -24,7 +24,6 @@ const (
 	TypeAgents     = "agents"
 	TypeSend       = "send"
 	TypeSent       = "sent"
-	TypeBroadcast  = "broadcast"
 	TypeMessage    = "message"
 	TypeError      = "error"
 )
@@ -135,35 +134,6 @@ func (d *Daemon) handleConn(conn net.Conn) {
 			}
 			d.sendTo(conn, Envelope{Type: TypeSent})
 
-		case TypeBroadcast:
-			fwd := Envelope{Type: TypeMessage, From: env.From, Body: env.Body}
-			data, _ := json.Marshal(fwd)
-			data = append(data, '\n')
-
-			type target struct {
-				pid  int
-				conn net.Conn
-			}
-			d.mu.RLock()
-			sender := d.agents[agentPID]
-			targets := make([]target, 0, len(d.agents))
-			for pid, a := range d.agents {
-				if pid == env.From {
-					continue
-				}
-				if !d.sameProject(sender, a, env.All) {
-					continue
-				}
-				targets = append(targets, target{pid, a.conn})
-			}
-			d.mu.RUnlock()
-
-			for _, t := range targets {
-				if _, err := t.conn.Write(data); err != nil {
-					log.Printf("failed to broadcast to agent %d: %v", t.pid, err)
-				}
-			}
-			d.sendTo(conn, Envelope{Type: TypeSent})
 		}
 	}
 }
