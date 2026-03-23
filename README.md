@@ -40,7 +40,7 @@ sessions.
 Install the binary:
 
 ```sh
-go install github.com/leoadberg/intermcp@latest
+go install github.com/leonardcser/intermcp@latest
 ```
 
 Add it as a global MCP server:
